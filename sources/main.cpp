@@ -11,6 +11,7 @@
 #include <loga/tokenized_multi_alignment.h>
 #include <loga/multi_alignment.h>
 #include <iostream>
+#include <fstream>
 #include <span>
 #include <filesystem>
 #include <cereal/archives/portable_binary.hpp>
@@ -248,6 +249,11 @@ int main(int argc, char** argv) {
         if(!labels.save(labels_file)){
             std::cout << "failed to save labels" << std::endl;
             return 1;
+        }
+        {
+            std::ofstream labels_txt(labels_file_path.string() + ".txt");
+            for (arma::uword i = 0; i < labels.n_elem; ++i)
+                labels_txt << labels(i) << "\n";
         }
     }
 
@@ -590,6 +596,11 @@ int main(int argc, char** argv) {
     if(!components.save(components_file)){
         std::cout << "failed to save components" << std::endl;
         return 1;
+    }
+    {
+        std::ofstream components_txt(components_file_path.string() + ".txt");
+        for (arma::uword i = 0; i < components.n_elem; ++i)
+            components_txt << components(i) << "\n";
     }
 
     std::cout << "Plase 1 completed run loga again for phase 2" << std::endl;

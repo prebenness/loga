@@ -1,0 +1,7 @@
+pandas>=2.2
+numpy>=1.26
+scipy>=1.14
+scikit-learn>=1.5
+regex>=2024.5
+tqdm>=4.66
+tabulate>=0.9

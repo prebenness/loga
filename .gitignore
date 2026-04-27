@@ -1,3 +1,10 @@
 build
 .qtcreator
 stage
+bench/env/
+bench/data/
+bench/results/loga/*/loga_work/
+bench/results/drain/*/
+bench/results/loga/*/*.log_structured.csv
+bench/results/loga/*/*.log_templates.csv
+bench/results/*.error.log
