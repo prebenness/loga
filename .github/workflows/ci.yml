@@ -93,6 +93,14 @@ jobs:
         run: |
           cmake --build build --config Release --parallel
 
+      - name: Run C++ tests
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Run NMEA experiment tests
+        run: |
+          python -m unittest discover -s experiments/nmea/tests -v
+
       - name: Install into stage/
         run: |
           cmake --install build --config Release --prefix "${{ github.workspace }}/stage"

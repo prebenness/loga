@@ -3,3 +3,5 @@
 /stage/
 /stage-*/
 /.qtcreator/
+__pycache__/
+*.py[cod]
