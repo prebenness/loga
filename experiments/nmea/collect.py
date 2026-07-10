@@ -18,6 +18,8 @@ from typing import Any, Iterable, Mapping, Sequence
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SUMMARY = re.compile(r"^\s*Summary:\s*(\d+)\s+clusters\s*$")
 TEMPLATE = re.compile(r"^\s*C(\d+)\s+(?:\N{BLACK CIRCLE}\s+)?(.+?)\s*$")
+COMPONENT_HEADER = re.compile(r"^\s*(?:◪\s+)?Label:\s*C(\d+)\s+\((\d+)\)\s*$")
+EXCLUDED = re.compile(r"^\s*Excluded\s+(\d+)\s*$")
 NMEA_IDENTIFIER = re.compile(r"\$([A-Z0-9]{5})(?=,)")
 RUN_DIRECTORY = re.compile(r"R\d{2}")
 
@@ -35,10 +37,21 @@ class Assignment:
 
 
 @dataclass(frozen=True)
+class ComponentCounts:
+    component_membership_count: int
+    excluded_from_alignment_count: int
+
+    @property
+    def alignment_support_count(self) -> int:
+        return self.component_membership_count - self.excluded_from_alignment_count
+
+
+@dataclass(frozen=True)
 class CollectedRun:
     run_id: str
     assignments: tuple[Assignment, ...]
     templates: Mapping[int, str]
+    component_counts: Mapping[int, ComponentCounts]
     summary: Mapping[str, Any]
 
 
@@ -76,6 +89,42 @@ def parse_final_templates(stdout: str) -> dict[int, str]:
             f"final Summary declares {expected_count} templates; parsed {len(templates)}"
         )
     return templates
+
+
+def parse_component_counts(stdout: str) -> dict[int, ComponentCounts]:
+    """Parse component membership and alignment exclusions from pass-two stdout."""
+    counts: dict[int, ComponentCounts] = {}
+    labels_with_exclusions: set[int] = set()
+    current_label: int | None = None
+
+    for line in strip_ansi(stdout).splitlines():
+        if match := COMPONENT_HEADER.fullmatch(line):
+            label = int(match.group(1))
+            membership = int(match.group(2))
+            if label in counts:
+                raise ValueError(f"duplicate component header C{label}")
+            counts[label] = ComponentCounts(membership, 0)
+            current_label = label
+            continue
+
+        if match := EXCLUDED.fullmatch(line):
+            if current_label is None:
+                raise ValueError("alignment exclusion appears before a component header")
+            if current_label in labels_with_exclusions:
+                raise ValueError(f"duplicate alignment exclusion for C{current_label}")
+            excluded = int(match.group(1))
+            membership = counts[current_label].component_membership_count
+            if excluded > membership:
+                raise ValueError(
+                    f"C{current_label} excludes {excluded} messages from "
+                    f"a component containing {membership}"
+                )
+            counts[current_label] = ComponentCounts(membership, excluded)
+            labels_with_exclusions.add(current_label)
+
+    if not counts:
+        raise ValueError("second-pass output contains no component headers")
+    return counts
 
 
 def read_armadillo_integer_row(path: Path) -> list[int]:
@@ -317,6 +366,7 @@ def analyse_run(
     labels: Sequence[int],
     templates: Mapping[int, str],
     source_rows: Sequence[int] | None = None,
+    component_counts: Mapping[int, ComponentCounts] | None = None,
 ) -> CollectedRun:
     if len(messages) != len(labels):
         raise ValueError(
@@ -335,6 +385,31 @@ def analyse_run(
         raise ValueError(
             f"{run_id}: template/component labels differ; missing={missing}, unused={unused}"
         )
+
+    membership_counts = Counter(labels)
+    if component_counts is None:
+        component_counts = {
+            label: ComponentCounts(membership, 0)
+            for label, membership in membership_counts.items()
+        }
+    if set(component_counts) != label_set:
+        missing = sorted(label_set - set(component_counts))
+        unused = sorted(set(component_counts) - label_set)
+        raise ValueError(
+            f"{run_id}: component-count labels differ; missing={missing}, unused={unused}"
+        )
+    for label, counts in component_counts.items():
+        observed_membership = membership_counts[label]
+        if counts.component_membership_count != observed_membership:
+            raise ValueError(
+                f"{run_id}: C{label} stdout reports "
+                f"{counts.component_membership_count} component members; "
+                f"components file contains {observed_membership}"
+            )
+        if counts.excluded_from_alignment_count < 0:
+            raise ValueError(f"{run_id}: C{label} has a negative exclusion count")
+        if counts.alignment_support_count <= 0:
+            raise ValueError(f"{run_id}: C{label} has no alignment-support messages")
 
     assignments = tuple(
         Assignment(
@@ -370,9 +445,21 @@ def analyse_run(
         for label, members in sorted(by_template.items())
         if len({member.identifier for member in members}) > 1
     ]
+    component_support = {
+        f"C{label}": {
+            "component_membership_count": counts.component_membership_count,
+            "excluded_from_alignment_count": counts.excluded_from_alignment_count,
+            "alignment_support_count": counts.alignment_support_count,
+        }
+        for label, counts in sorted(component_counts.items())
+    }
+    total_excluded = sum(
+        counts.excluded_from_alignment_count for counts in component_counts.values()
+    )
     summary = {
         "run_id": run_id,
         "message_count": len(messages),
+        "component_membership_count": len(messages),
         "template_count": len(templates),
         "identifier_counts": dict(sorted(identifier_totals.items())),
         "mixed_identifier_template_count": len(mixed_labels),
@@ -381,8 +468,17 @@ def analyse_run(
         "fragmented_identifier_count": sum(
             item["fragmented"] for item in fragmentation.values()
         ),
+        "excluded_from_alignment_count": total_excluded,
+        "alignment_support_count": len(messages) - total_excluded,
+        "components_with_exclusions_count": sum(
+            counts.excluded_from_alignment_count > 0
+            for counts in component_counts.values()
+        ),
+        "component_support": component_support,
     }
-    return CollectedRun(run_id, assignments, dict(templates), summary)
+    return CollectedRun(
+        run_id, assignments, dict(templates), dict(component_counts), summary
+    )
 
 
 def template_rows(run: CollectedRun) -> list[dict[str, Any]]:
@@ -395,6 +491,7 @@ def template_rows(run: CollectedRun) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for label, template in sorted(run.templates.items()):
         members = by_template[label]
+        counts = run.component_counts[label]
         identifier_counts = Counter(member.identifier for member in members)
         fragmented = sorted(
             identifier
@@ -407,7 +504,9 @@ def template_rows(run: CollectedRun) -> list[dict[str, Any]]:
                 "run_id": run.run_id,
                 "template_label": f"C{label}",
                 "template": template,
-                "message_count": len(members),
+                "component_membership_count": counts.component_membership_count,
+                "excluded_from_alignment_count": counts.excluded_from_alignment_count,
+                "alignment_support_count": counts.alignment_support_count,
                 "identifier_counts_json": json.dumps(
                     dict(sorted(identifier_counts.items())), separators=(",", ":")
                 ),
@@ -426,8 +525,8 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
         "run_id",
         "input_row_0based",
         "source_row_0based",
-        "template_label",
-        "template",
+        "component_label",
+        "associated_template",
         "nmea_identifier",
         "message",
     )
@@ -442,8 +541,8 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
                     "run_id": run.run_id,
                     "input_row_0based": assignment.input_row,
                     "source_row_0based": assignment.source_row,
-                    "template_label": f"C{assignment.label}",
-                    "template": assignment.template,
+                    "component_label": f"C{assignment.label}",
+                    "associated_template": assignment.template,
                     "nmea_identifier": assignment.identifier,
                     "message": assignment.message,
                 }
@@ -453,7 +552,9 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
         "run_id",
         "template_label",
         "template",
-        "message_count",
+        "component_membership_count",
+        "excluded_from_alignment_count",
+        "alignment_support_count",
         "identifier_counts_json",
         "mixed_identifier",
         "fragmented_identifiers",
@@ -490,7 +591,9 @@ def collect_run(results_dir: Path, run_dir: Path) -> CollectedRun:
     if not messages or any(not message for message in messages):
         raise ValueError(f"{run_id}: prepared input contains an empty record")
     labels = read_armadillo_integer_row(components_path)
-    templates = parse_final_templates(stdout_path.read_text(encoding="utf-8"))
+    stdout = stdout_path.read_text(encoding="utf-8")
+    templates = parse_final_templates(stdout)
+    component_counts = parse_component_counts(stdout)
 
     mapping_path = files["source_row_map"]
     if mapping_path is not None:
@@ -501,7 +604,14 @@ def collect_run(results_dir: Path, run_dir: Path) -> CollectedRun:
     if run_id == "R08" and mapping_path is None:
         raise ValueError("R08 requires the runner-recorded shuffle index")
 
-    return analyse_run(run_id, messages, labels, templates, source_rows)
+    return analyse_run(
+        run_id,
+        messages,
+        labels,
+        templates,
+        source_rows,
+        component_counts,
+    )
 
 
 def exact_partition_equivalence(left: Sequence[int], right: Sequence[int]) -> bool:

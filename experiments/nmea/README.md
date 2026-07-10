@@ -49,6 +49,10 @@ For the complete R01--R09 matrix, omit `--runs R01` and use a new output directo
 
 The collector writes `message-assignments.csv`, `templates.csv` and `summary.json` for each run, followed by `comparisons.json` for the repeat, reordering and prefix comparisons.
 
+`message-assignments.csv` records each input message's final component membership and the template associated with that component. It does not assert that the template accepts the message. Loga may exclude component members from the multi-message alignment before it constructs the template, and its current output does not preserve unambiguous row identifiers for excluded duplicate messages. The assignment file therefore contains no row-level exclusion flag.
+
+`templates.csv` reports `component_membership_count`, `excluded_from_alignment_count` and `alignment_support_count` for every component template. `summary.json` records the same values by component, together with their run-level totals. These counts distinguish all messages placed in a component from the subset used to infer its template.
+
 ## Data handling
 
 The runner copies prepared messages and representative examples into the result tree. Keep source data and result directories outside this public repository unless their redistribution has been authorised.

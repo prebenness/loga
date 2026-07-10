@@ -5,14 +5,17 @@ import json
 import struct
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from experiments.nmea.collect import (
+    ComponentCounts,
     adjusted_rand_index,
     analyse_run,
     collect_experiment,
     compare_runs,
     exact_partition_equivalence,
+    parse_component_counts,
     parse_final_templates,
     read_armadillo_integer_row,
     read_source_row_map,
@@ -39,6 +42,20 @@ def summary_output(templates: dict[int, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def second_pass_output(
+    templates: dict[int, str],
+    component_sizes: dict[int, int],
+    exclusions: dict[int, int] | None = None,
+) -> str:
+    exclusions = exclusions or {}
+    lines: list[str] = []
+    for label in templates:
+        lines.append(f"\x1b[1;33m◪\x1b[0m Label: C{label} ({component_sizes[label]})")
+        if label in exclusions:
+            lines.append(f"\x1b[1;31m    Excluded {exclusions[label]}")
+    return "\n".join(lines) + "\n" + summary_output(templates)
+
+
 class ParserTests(unittest.TestCase):
     def test_only_the_last_summary_block_is_collected(self) -> None:
         output = (
@@ -52,6 +69,27 @@ class ParserTests(unittest.TestCase):
             parse_final_templates(output),
             {0: "$GPRMC,$0", 1: "$GPGLL,$0"},
         )
+
+    def test_component_membership_and_exclusions_are_collected(self) -> None:
+        output = second_pass_output(
+            {0: "$GPRMC,$0", 1: "$GPGLL,$0"},
+            {0: 5, 1: 3},
+            {0: 2},
+        )
+
+        self.assertEqual(
+            parse_component_counts(output),
+            {
+                0: ComponentCounts(5, 2),
+                1: ComponentCounts(3, 0),
+            },
+        )
+
+    def test_component_exclusion_cannot_exceed_membership(self) -> None:
+        output = second_pass_output({0: "$GPRMC,$0"}, {0: 2}, {0: 3})
+
+        with self.assertRaisesRegex(ValueError, "excludes 3 messages"):
+            parse_component_counts(output)
 
     def test_armadillo_unsigned_64_bit_row_is_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -99,6 +137,11 @@ class AnalysisTests(unittest.TestCase):
             messages,
             [0, 0, 1, 2, 2],
             {0: "$GP$0", 1: "$GPRMC,$0", 2: "$TIROT,$0"},
+            component_counts={
+                0: ComponentCounts(2, 1),
+                1: ComponentCounts(1, 0),
+                2: ComponentCounts(2, 0),
+            },
         )
 
         self.assertEqual(run.summary["mixed_identifier_templates"], ["C0"])
@@ -109,6 +152,13 @@ class AnalysisTests(unittest.TestCase):
         )
         rows = {row["template_label"]: row for row in template_rows(run)}
         self.assertEqual(rows["C0"]["identifier_counts_json"], '{"GPGLL":1,"GPRMC":1}')
+        self.assertEqual(rows["C0"]["component_membership_count"], 2)
+        self.assertEqual(rows["C0"]["excluded_from_alignment_count"], 1)
+        self.assertEqual(rows["C0"]["alignment_support_count"], 1)
+        self.assertEqual(run.summary["component_membership_count"], 5)
+        self.assertEqual(run.summary["excluded_from_alignment_count"], 1)
+        self.assertEqual(run.summary["alignment_support_count"], 4)
+        self.assertEqual(run.summary["components_with_exclusions_count"], 1)
         self.assertEqual(rows["C2"]["example_1"], "$TIROT,four*03")
         self.assertEqual(rows["C2"]["example_2"], "")
 
@@ -160,7 +210,9 @@ class CollectionWorkflowTests(unittest.TestCase):
         input_path.parent.mkdir(parents=True)
         stdout_path.parent.mkdir(parents=True)
         input_path.write_text("\n".join(messages) + "\n", encoding="utf-8")
-        stdout_path.write_text(summary_output(templates), encoding="utf-8")
+        stdout_path.write_text(
+            second_pass_output(templates, dict(Counter(labels))), encoding="utf-8"
+        )
         write_armadillo_row(components_path, labels)
 
         manifest: dict[str, object] = {
@@ -228,6 +280,20 @@ class CollectionWorkflowTests(unittest.TestCase):
                 self.assertTrue((root / run_id / "message-assignments.csv").is_file())
                 self.assertTrue((root / run_id / "templates.csv").is_file())
                 self.assertTrue((root / run_id / "summary.json").is_file())
+                with (root / run_id / "message-assignments.csv").open(
+                    encoding="utf-8", newline=""
+                ) as stream:
+                    assignment_fields = csv.DictReader(stream).fieldnames
+                self.assertIn("component_label", assignment_fields or [])
+                self.assertIn("associated_template", assignment_fields or [])
+                self.assertNotIn("excluded_from_alignment", assignment_fields or [])
+                with (root / run_id / "templates.csv").open(
+                    encoding="utf-8", newline=""
+                ) as stream:
+                    template_fields = csv.DictReader(stream).fieldnames
+                self.assertIn("component_membership_count", template_fields or [])
+                self.assertIn("excluded_from_alignment_count", template_fields or [])
+                self.assertIn("alignment_support_count", template_fields or [])
 
             comparison_report = json.loads(
                 (root / "comparisons.json").read_text(encoding="utf-8")
