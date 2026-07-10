@@ -107,7 +107,7 @@ double sim_score(const T& l_coordinate, const T& r_coordinate) {
 
 template <typename T, std::enable_if_t<!std::is_same_v<T, prova::loga::token::coordinate>, bool> = true>
 double sim_score(const T& l, const T& r) {
-    return (l == r);
+    return l == r ? 0.0 : 1.0;
 }
 
 template <typename Iterator>

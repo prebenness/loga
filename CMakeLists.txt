@@ -111,6 +111,14 @@ set_property(TARGET loga_exe PROPERTY CXX_STANDARD 20)
 target_link_libraries(loga_exe PRIVATE Boost::headers Boost::program_options Armadillo::Armadillo loga_lib)
 set_property(TARGET loga_exe PROPERTY OUTPUT_NAME loga)
 
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(loga_levenshtein_distance_test tests/levenshtein_distance_test.cpp)
+  set_property(TARGET loga_levenshtein_distance_test PROPERTY CXX_STANDARD 20)
+  target_link_libraries(loga_levenshtein_distance_test PRIVATE Boost::headers)
+  add_test(NAME levenshtein_distance COMMAND loga_levenshtein_distance_test)
+endif()
+
 include(GNUInstallDirs)
 
 if(APPLE)

@@ -1,3 +1,5 @@
-build
-.qtcreator
-stage
+/build/
+/build-*/
+/stage/
+/stage-*/
+/.qtcreator/
