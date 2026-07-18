@@ -30,13 +30,42 @@ The reproducible workflow for the preliminary NMEA study is documented in
 
 ## Usage
 
-loga is a command line application. Only necessary input is the log file. 
-It is assumed that the logfile is a sequence of ASCII messages seperated by new line characters.
-A terminal that supports ANSI colors is necessary to view the output.
+Loga reads one ASCII log message per line. It trims leading and trailing
+whitespace and skips empty lines.
+
+### Extract templates
+
+Run Loga twice on the same file from the same working directory. The first run
+creates the component assignment; the second prints the final component
+templates.
 
 ```bash
-./loga Logfile.log
+./loga Logfile.log > pass-01.log
+./loga Logfile.log > pass-02.log
 ```
+
+The output contains ANSI colours. Retain the raw second-pass output when it
+will be used for matching: the colours distinguish placeholder markers such
+as `$0` from identical literal text.
+
+### Match another log against the final templates
+
+```bash
+./loga match \
+  --templates pass-02.log \
+  --input Unseen.log \
+  --output matches.jsonl
+```
+
+The output contains one JSON object per non-empty input line. `matches` lists
+every accepting component template. An empty list means that no template
+accepted the complete line. Unique placeholder values are returned in
+`captures`; `capture_ambiguous` is true when several token divisions are
+valid.
+
+During template extraction, Loga verifies that every message retained in an
+alignment is accepted by the template inferred from that alignment. Messages
+excluded by outlier or alignment filtering are outside this guarantee.
 
 ![Apache Log Demo](https://github.com/user-attachments/assets/baec328f-f0e8-41d1-9701-8ad3c59f44bb)
 

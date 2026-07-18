@@ -12,6 +12,7 @@
 #include <loga/multi_alignment.h>
 #include <iostream>
 #include <span>
+#include <string_view>
 #include <filesystem>
 #include <cereal/archives/portable_binary.hpp>
 #include <igraph/igraph.h>
@@ -26,15 +27,27 @@
 #include <loga/automata.h>
 #include <loga/pattern_sequence.h>
 #include <loga/outliers.h>
+#include <loga/template_matcher.h>
+#include "match_command.h"
 
 class parsed{
     std::size_t _id;
     std::size_t _cluster;
     prova::loga::tokenized_multi_alignment::interval_set _intervals;
+    std::vector<std::size_t> _contributors;
 
 public:
-    inline explicit parsed(std::size_t id, std::size_t cluster, prova::loga::tokenized_multi_alignment::interval_set&& intervals): _id(id), _cluster(cluster), _intervals(std::move(intervals)) {}
+    inline explicit parsed(
+        std::size_t id,
+        std::size_t cluster,
+        prova::loga::tokenized_multi_alignment::interval_set&& intervals,
+        std::vector<std::size_t>&& contributors)
+        : _id(id),
+          _cluster(cluster),
+          _intervals(std::move(intervals)),
+          _contributors(std::move(contributors)) {}
     const prova::loga::tokenized_multi_alignment::interval_set& intervals() const { return _intervals; }
+    const std::vector<std::size_t>& contributors() const { return _contributors; }
     std::size_t id() const { return _id; }
     std::size_t cluster() const { return _cluster; }
 };
@@ -142,6 +155,10 @@ prova::loga::community_detection_algorithm parse_algo(const std::string& name) {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "match") {
+        return prova::loga::run_match_command(argc - 1, argv + 1);
+    }
+
     boost::program_options::variables_map vm;
     try{
         boost::program_options::options_description desc("Allowed options");
@@ -358,7 +375,20 @@ int main(int argc, char** argv) {
         }
 
         prova::loga::tokenized_multi_alignment malign(subcollection, paths, base);
-        prova::loga::tokenized_multi_alignment::region_map regions = malign.align(cli_p2_threshold);
+        prova::loga::tokenized_multi_alignment::filter_type accidental_exclusions;
+        prova::loga::tokenized_multi_alignment::region_map regions =
+            malign.align(cli_p2_threshold, accidental_exclusions);
+        std::vector<std::size_t> contributors;
+        for(std::size_t local_id = 0; local_id < references.size(); ++local_id) {
+            if(!accidental_exclusions.contains(local_id)) {
+                contributors.push_back(references.at(local_id));
+            }
+        }
+        std::cout << "Contributors " << cluster_name << ":";
+        for(std::size_t global_id: contributors) {
+            std::cout << " " << global_id;
+        }
+        std::cout << std::endl;
         const auto& base_zones = regions.at(0);
         std::size_t placeholder_count = 0;
         std::cout << std::right << std::setw(5) << "     " << prova::loga::colors::bright_yellow << "●" << prova::loga::colors::reset << " " << std::resetiosflags(std::ios::showbase);
@@ -396,7 +426,8 @@ int main(int argc, char** argv) {
         }
 
         auto pattern_zones = base_zones;
-        parsed cluster_pattern(references.at(0), c, std::move(pattern_zones));
+        parsed cluster_pattern(
+            references.at(0), c, std::move(pattern_zones), std::move(contributors));
         patterns.insert(std::make_pair(c, cluster_pattern));
 
         cluster_patterns.insert(std::make_pair(c, base_zones));
@@ -438,6 +469,15 @@ int main(int argc, char** argv) {
                 ++placeholder_count;
             }
             pseq.add(std::move(seg));
+        }
+        for(std::size_t contributor: p.contributors()) {
+            if(!prova::loga::match_template(pseq, collection.at(contributor)).accepted) {
+                throw std::runtime_error(
+                    std::format(
+                        "generated template {} does not accept contributor row {}",
+                        cluster_name,
+                        contributor));
+            }
         }
         std::cout << std::endl;
         pseqs.emplace_back(std::move(pseq));

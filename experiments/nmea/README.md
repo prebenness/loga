@@ -49,9 +49,30 @@ For the complete R01--R09 matrix, omit `--runs R01` and use a new output directo
 
 The collector writes `message-assignments.csv`, `templates.csv` and `summary.json` for each run, followed by `comparisons.json` for the repeat, reordering and prefix comparisons.
 
-`message-assignments.csv` records each input message's final component membership and the template associated with that component. It does not assert that the template accepts the message. Loga may exclude component members from the multi-message alignment before it constructs the template, and its current output does not preserve unambiguous row identifiers for excluded duplicate messages. The assignment file therefore contains no row-level exclusion flag.
+`message-assignments.csv` records each input message's final component,
+associated template and whether the row contributed to the alignment that
+produced that template.
 
-`templates.csv` reports `component_membership_count`, `excluded_from_alignment_count` and `alignment_support_count` for every component template. `summary.json` records the same values by component, together with their run-level totals. These counts distinguish all messages placed in a component from the subset used to infer its template.
+`templates.csv` reports component membership, LOF exclusions, subsequent
+alignment exclusions, total exclusions and the exact contributor count for
+every template. `summary.json` records the same values by component and in
+total. Historical Loga output without contributor row identifiers remains
+readable, but its exact contributor fields are reported as `unknown`.
+
+## 4. Apply the templates
+
+Use the raw second-pass output as the template source:
+
+```sh
+build/loga match \
+  --templates "/path/to/results/R01/passes/pass-02/stdout.log" \
+  --input "/path/to/unseen-messages.log" \
+  --output "/path/to/matches.jsonl"
+```
+
+Each JSON line contains the source line number, normalised message and every
+matching final component template. The same command can be applied to the
+training input to audit the retained-contributor guarantee.
 
 ## Data handling
 

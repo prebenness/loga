@@ -20,6 +20,7 @@ SUMMARY = re.compile(r"^\s*Summary:\s*(\d+)\s+clusters\s*$")
 TEMPLATE = re.compile(r"^\s*C(\d+)\s+(?:\N{BLACK CIRCLE}\s+)?(.+?)\s*$")
 COMPONENT_HEADER = re.compile(r"^\s*(?:◪\s+)?Label:\s*C(\d+)\s+\((\d+)\)\s*$")
 EXCLUDED = re.compile(r"^\s*Excluded\s+(\d+)\s*$")
+CONTRIBUTORS = re.compile(r"^\s*Contributors\s+C(\d+):(?:\s*(.*?))?\s*$")
 NMEA_IDENTIFIER = re.compile(r"\$([A-Z0-9]{5})(?=,)")
 RUN_DIRECTORY = re.compile(r"R\d{2}")
 
@@ -34,16 +35,38 @@ class Assignment:
     template: str
     identifier: str
     message: str
+    alignment_contributor: bool | None
 
 
 @dataclass(frozen=True)
 class ComponentCounts:
     component_membership_count: int
-    excluded_from_alignment_count: int
+    lof_excluded_count: int
+    contributor_ids: frozenset[int] | None = None
 
     @property
-    def alignment_support_count(self) -> int:
-        return self.component_membership_count - self.excluded_from_alignment_count
+    def contributor_status_available(self) -> bool:
+        return self.contributor_ids is not None
+
+    @property
+    def accidental_excluded_count(self) -> int | None:
+        if self.contributor_ids is None:
+            return None
+        return (
+            self.component_membership_count
+            - self.lof_excluded_count
+            - len(self.contributor_ids)
+        )
+
+    @property
+    def excluded_from_alignment_count(self) -> int | None:
+        if self.contributor_ids is None:
+            return None
+        return self.component_membership_count - len(self.contributor_ids)
+
+    @property
+    def alignment_support_count(self) -> int | None:
+        return len(self.contributor_ids) if self.contributor_ids is not None else None
 
 
 @dataclass(frozen=True)
@@ -92,9 +115,11 @@ def parse_final_templates(stdout: str) -> dict[int, str]:
 
 
 def parse_component_counts(stdout: str) -> dict[int, ComponentCounts]:
-    """Parse component membership and alignment exclusions from pass-two stdout."""
+    """Parse component membership, LOF exclusions and exact contributors."""
     counts: dict[int, ComponentCounts] = {}
     labels_with_exclusions: set[int] = set()
+    labels_with_contributors: set[int] = set()
+    all_contributor_ids: set[int] = set()
     current_label: int | None = None
 
     for line in strip_ansi(stdout).splitlines():
@@ -105,6 +130,42 @@ def parse_component_counts(stdout: str) -> dict[int, ComponentCounts]:
                 raise ValueError(f"duplicate component header C{label}")
             counts[label] = ComponentCounts(membership, 0)
             current_label = label
+            continue
+
+        if match := CONTRIBUTORS.fullmatch(line):
+            label = int(match.group(1))
+            if label not in counts:
+                raise ValueError(
+                    f"contributor list for C{label} appears before its component header"
+                )
+            if label != current_label:
+                raise ValueError(
+                    f"contributor list for C{label} appears inside C{current_label}"
+                )
+            if label in labels_with_contributors:
+                raise ValueError(f"duplicate contributor list for C{label}")
+
+            fields = match.group(2).split() if match.group(2) else []
+            if any(not re.fullmatch(r"\d+", field) for field in fields):
+                raise ValueError(f"invalid contributor row ID for C{label}")
+            contributor_ids = [int(field) for field in fields]
+            if len(contributor_ids) != len(set(contributor_ids)):
+                raise ValueError(f"duplicate contributor row ID for C{label}")
+            duplicated_across_components = all_contributor_ids & set(contributor_ids)
+            if duplicated_across_components:
+                duplicate = min(duplicated_across_components)
+                raise ValueError(
+                    f"contributor row {duplicate} appears in multiple components"
+                )
+
+            previous = counts[label]
+            counts[label] = ComponentCounts(
+                previous.component_membership_count,
+                previous.lof_excluded_count,
+                frozenset(contributor_ids),
+            )
+            labels_with_contributors.add(label)
+            all_contributor_ids.update(contributor_ids)
             continue
 
         if match := EXCLUDED.fullmatch(line):
@@ -119,11 +180,30 @@ def parse_component_counts(stdout: str) -> dict[int, ComponentCounts]:
                     f"C{current_label} excludes {excluded} messages from "
                     f"a component containing {membership}"
                 )
-            counts[current_label] = ComponentCounts(membership, excluded)
+            counts[current_label] = ComponentCounts(
+                membership,
+                excluded,
+                counts[current_label].contributor_ids,
+            )
             labels_with_exclusions.add(current_label)
 
     if not counts:
         raise ValueError("second-pass output contains no component headers")
+
+    if labels_with_contributors and labels_with_contributors != set(counts):
+        missing = sorted(set(counts) - labels_with_contributors)
+        raise ValueError(f"missing contributor lists for components {missing}")
+
+    for label, component in counts.items():
+        if component.contributor_ids is None:
+            continue
+        known_rows = component.lof_excluded_count + len(component.contributor_ids)
+        if known_rows > component.component_membership_count:
+            raise ValueError(
+                f"C{label} reports {component.lof_excluded_count} LOF exclusions "
+                f"and {len(component.contributor_ids)} contributors for "
+                f"{component.component_membership_count} component members"
+            )
     return counts
 
 
@@ -360,6 +440,10 @@ def _distinct_examples(assignments: Iterable[Assignment], limit: int = 3) -> lis
     return examples
 
 
+def _csv_known(value: int | None) -> int | str:
+    return value if value is not None else "unknown"
+
+
 def analyse_run(
     run_id: str,
     messages: Sequence[str],
@@ -398,6 +482,16 @@ def analyse_run(
         raise ValueError(
             f"{run_id}: component-count labels differ; missing={missing}, unused={unused}"
         )
+
+    availability = {
+        counts.contributor_status_available for counts in component_counts.values()
+    }
+    if len(availability) != 1:
+        raise ValueError(
+            f"{run_id}: contributor status is available for only some components"
+        )
+    contributor_status_available = availability == {True}
+    observed_contributor_ids: set[int] = set()
     for label, counts in component_counts.items():
         observed_membership = membership_counts[label]
         if counts.component_membership_count != observed_membership:
@@ -406,10 +500,41 @@ def analyse_run(
                 f"{counts.component_membership_count} component members; "
                 f"components file contains {observed_membership}"
             )
-        if counts.excluded_from_alignment_count < 0:
-            raise ValueError(f"{run_id}: C{label} has a negative exclusion count")
-        if counts.alignment_support_count <= 0:
-            raise ValueError(f"{run_id}: C{label} has no alignment-support messages")
+        if counts.lof_excluded_count < 0:
+            raise ValueError(f"{run_id}: C{label} has a negative LOF exclusion count")
+        if counts.lof_excluded_count > observed_membership:
+            raise ValueError(
+                f"{run_id}: C{label} has more LOF exclusions than component members"
+            )
+
+        if counts.contributor_ids is None:
+            continue
+        if counts.alignment_support_count == 0:
+            raise ValueError(f"{run_id}: C{label} has no alignment contributors")
+        if counts.accidental_excluded_count is None:
+            raise AssertionError("known contributors must give an accidental count")
+        if counts.accidental_excluded_count < 0:
+            raise ValueError(
+                f"{run_id}: C{label} has more contributors than post-LOF members"
+            )
+
+        duplicate_ids = observed_contributor_ids & counts.contributor_ids
+        if duplicate_ids:
+            duplicate = min(duplicate_ids)
+            raise ValueError(
+                f"{run_id}: contributor row {duplicate} appears in multiple components"
+            )
+        for input_row in counts.contributor_ids:
+            if input_row < 0 or input_row >= len(labels):
+                raise ValueError(
+                    f"{run_id}: C{label} contributor row {input_row} is out of range"
+                )
+            if labels[input_row] != label:
+                raise ValueError(
+                    f"{run_id}: contributor row {input_row} is assigned to "
+                    f"C{labels[input_row]}, not C{label}"
+                )
+        observed_contributor_ids.update(counts.contributor_ids)
 
     assignments = tuple(
         Assignment(
@@ -419,6 +544,11 @@ def analyse_run(
             template=templates[label],
             identifier=extract_identifier(messages[input_row]),
             message=messages[input_row],
+            alignment_contributor=(
+                None
+                if component_counts[label].contributor_ids is None
+                else input_row in component_counts[label].contributor_ids
+            ),
         )
         for input_row, label in enumerate(labels)
     )
@@ -448,13 +578,43 @@ def analyse_run(
     component_support = {
         f"C{label}": {
             "component_membership_count": counts.component_membership_count,
+            "contributor_status_available": counts.contributor_status_available,
+            "lof_excluded_count": counts.lof_excluded_count,
+            "accidental_excluded_count": counts.accidental_excluded_count,
             "excluded_from_alignment_count": counts.excluded_from_alignment_count,
             "alignment_support_count": counts.alignment_support_count,
         }
         for label, counts in sorted(component_counts.items())
     }
-    total_excluded = sum(
-        counts.excluded_from_alignment_count for counts in component_counts.values()
+    total_lof_excluded = sum(
+        counts.lof_excluded_count for counts in component_counts.values()
+    )
+    total_accidental_excluded = (
+        sum(
+            counts.accidental_excluded_count
+            for counts in component_counts.values()
+            if counts.accidental_excluded_count is not None
+        )
+        if contributor_status_available
+        else None
+    )
+    total_excluded = (
+        sum(
+            counts.excluded_from_alignment_count
+            for counts in component_counts.values()
+            if counts.excluded_from_alignment_count is not None
+        )
+        if contributor_status_available
+        else None
+    )
+    total_alignment_support = (
+        sum(
+            counts.alignment_support_count
+            for counts in component_counts.values()
+            if counts.alignment_support_count is not None
+        )
+        if contributor_status_available
+        else None
     )
     summary = {
         "run_id": run_id,
@@ -468,11 +628,22 @@ def analyse_run(
         "fragmented_identifier_count": sum(
             item["fragmented"] for item in fragmentation.values()
         ),
+        "contributor_status_available": contributor_status_available,
+        "lof_excluded_count": total_lof_excluded,
+        "accidental_excluded_count": total_accidental_excluded,
         "excluded_from_alignment_count": total_excluded,
-        "alignment_support_count": len(messages) - total_excluded,
-        "components_with_exclusions_count": sum(
-            counts.excluded_from_alignment_count > 0
-            for counts in component_counts.values()
+        "alignment_support_count": total_alignment_support,
+        "components_with_lof_exclusions_count": sum(
+            counts.lof_excluded_count > 0 for counts in component_counts.values()
+        ),
+        "components_with_exclusions_count": (
+            sum(
+                counts.excluded_from_alignment_count > 0
+                for counts in component_counts.values()
+                if counts.excluded_from_alignment_count is not None
+            )
+            if contributor_status_available
+            else None
         ),
         "component_support": component_support,
     }
@@ -505,8 +676,19 @@ def template_rows(run: CollectedRun) -> list[dict[str, Any]]:
                 "template_label": f"C{label}",
                 "template": template,
                 "component_membership_count": counts.component_membership_count,
-                "excluded_from_alignment_count": counts.excluded_from_alignment_count,
-                "alignment_support_count": counts.alignment_support_count,
+                "contributor_status_available": str(
+                    counts.contributor_status_available
+                ).lower(),
+                "lof_excluded_count": counts.lof_excluded_count,
+                "accidental_excluded_count": _csv_known(
+                    counts.accidental_excluded_count
+                ),
+                "excluded_from_alignment_count": _csv_known(
+                    counts.excluded_from_alignment_count
+                ),
+                "alignment_support_count": _csv_known(
+                    counts.alignment_support_count
+                ),
                 "identifier_counts_json": json.dumps(
                     dict(sorted(identifier_counts.items())), separators=(",", ":")
                 ),
@@ -527,6 +709,7 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
         "source_row_0based",
         "component_label",
         "associated_template",
+        "alignment_contributor",
         "nmea_identifier",
         "message",
     )
@@ -543,6 +726,11 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
                     "source_row_0based": assignment.source_row,
                     "component_label": f"C{assignment.label}",
                     "associated_template": assignment.template,
+                    "alignment_contributor": (
+                        "unknown"
+                        if assignment.alignment_contributor is None
+                        else str(assignment.alignment_contributor).lower()
+                    ),
                     "nmea_identifier": assignment.identifier,
                     "message": assignment.message,
                 }
@@ -553,6 +741,9 @@ def write_run_outputs(run_dir: Path, run: CollectedRun) -> None:
         "template_label",
         "template",
         "component_membership_count",
+        "contributor_status_available",
+        "lof_excluded_count",
+        "accidental_excluded_count",
         "excluded_from_alignment_count",
         "alignment_support_count",
         "identifier_counts_json",

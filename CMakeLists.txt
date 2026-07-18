@@ -66,6 +66,8 @@ set(SOURCES
   sources/automata.cpp
   sources/outliers.cpp
   sources/pattern_sequence.cpp
+  sources/template_matcher.cpp
+  sources/template_output.cpp
 )
 
 set(INCLUDES
@@ -95,6 +97,8 @@ set(INCLUDES
   includes/loga/automata.h
   includes/loga/pattern_sequence.h
   includes/loga/outliers.h
+  includes/loga/template_matcher.h
+  includes/loga/template_output.h
 )
 
 add_library(loga_lib SHARED ${SOURCES} ${INCLUDES})
@@ -106,7 +110,7 @@ if (WIN32)
     set_target_properties(loga_lib PROPERTIES ARCHIVE_OUTPUT_NAME "loga_lib")
 endif()
 
-add_executable(loga_exe sources/main.cpp)
+add_executable(loga_exe sources/main.cpp sources/match_command.cpp sources/match_command.h)
 set_property(TARGET loga_exe PROPERTY CXX_STANDARD 20)
 target_link_libraries(loga_exe PRIVATE Boost::headers Boost::program_options Armadillo::Armadillo loga_lib)
 set_property(TARGET loga_exe PROPERTY OUTPUT_NAME loga)
@@ -117,6 +121,30 @@ if(BUILD_TESTING)
   set_property(TARGET loga_levenshtein_distance_test PROPERTY CXX_STANDARD 20)
   target_link_libraries(loga_levenshtein_distance_test PRIVATE Boost::headers)
   add_test(NAME levenshtein_distance COMMAND loga_levenshtein_distance_test)
+
+  add_executable(loga_template_matcher_test tests/template_matcher_test.cpp)
+  set_property(TARGET loga_template_matcher_test PROPERTY CXX_STANDARD 20)
+  target_link_libraries(loga_template_matcher_test PRIVATE loga_lib)
+  add_test(NAME template_matcher COMMAND loga_template_matcher_test)
+
+  add_executable(loga_template_output_test tests/template_output_test.cpp)
+  set_property(TARGET loga_template_output_test PROPERTY CXX_STANDARD 20)
+  target_link_libraries(loga_template_output_test PRIVATE loga_lib)
+  add_test(NAME template_output COMMAND loga_template_output_test)
+
+  add_executable(
+    loga_match_command_test
+    tests/match_command_test.cpp
+    sources/match_command.cpp
+    sources/match_command.h
+  )
+  set_property(TARGET loga_match_command_test PROPERTY CXX_STANDARD 20)
+  target_include_directories(loga_match_command_test PRIVATE sources)
+  target_link_libraries(
+    loga_match_command_test
+    PRIVATE Boost::program_options loga_lib
+  )
+  add_test(NAME match_command COMMAND loga_match_command_test)
 endif()
 
 include(GNUInstallDirs)

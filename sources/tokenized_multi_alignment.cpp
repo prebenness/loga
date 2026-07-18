@@ -6,6 +6,13 @@
 #include <numeric>
 
 prova::loga::tokenized_multi_alignment::region_map prova::loga::tokenized_multi_alignment::align(double cutoff) const {
+    filter_type ignored_exclusions;
+    return align(cutoff, ignored_exclusions);
+}
+
+prova::loga::tokenized_multi_alignment::region_map prova::loga::tokenized_multi_alignment::align(
+    double cutoff,
+    filter_type& cumulative_excluded) const {
     interval_map intervals;
     region_map regions;
     std::set<std::size_t> excluded;
@@ -147,6 +154,7 @@ prova::loga::tokenized_multi_alignment::region_map prova::loga::tokenized_multi_
         }
     }
     
+    cumulative_excluded = excluded;
     return regions;
 }
 
